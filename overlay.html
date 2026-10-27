@@ -49,9 +49,12 @@ const P = {
   wallFriction:    0.86,   // tangential damping on wall hit
 
   // Crack detection
-  crackSpeed:     340,     // tip velocity threshold to trigger crack
+  crackSpeed:     80,      // tip velocity threshold to trigger crack (80 = normaler Schwung, vorher 340 = sehr harter Hieb)
+  mouseCrackSpeed: 15,     // Mindest-Mausgeschwindigkeit (px/Frame) – ohne bewussten Schwung kein Knall
   crackCooldownMs:200,   // min ms between cracks
-  firstCrackGraceMs: 350, // no crack (macro) until this long after spawn
+  nudgeCooldownMs:2500,  // min ms between nudges (an Freebuff) – der Knall-Sound kommt bei jedem Hieb
+  firstCrackGraceMs: 800, // no crack (macro) until this long after spawn (der Wurf selbst darf nicht knallen)
+  idleDropMs:     6000,  // so lange darf die Peitsche ruhen, dann fällt sie von selbst (kein Zufallsknall später)
 
   // Visuals
   lineWidthHandle: 7,      // rope thickness near handle
@@ -81,11 +84,71 @@ let prevMouseX = 0, prevMouseY = 0;
 let whip = null;
 let dropping = false;
 let lastCrackTime = 0;
+let lastNudgeTime = 0;
 let whipSpawnTime = 0;
 let handleAngle = P.baseTargetAngle;
 let handleAngVel = 0;
 
-const WHIP_CRACK_SOUNDS = ['sounds/A.mp3', 'sounds/B.mp3', 'sounds/C.mp3', 'sounds/D.mp3', 'sounds/E.mp3'];
+const WHIP_CRACK_SOUND_FILES = ['sounds/A.mp3', 'sounds/B.mp3', 'sounds/C.mp3', 'sounds/D.mp3', 'sounds/E.mp3'];
+
+// Sounds einmal vorladen und die Referenzen behalten: ein unbenutztes
+// Audio-Objekt kann Chromium sonst einsammeln, bevor es hörbar wird.
+const crackSounds = WHIP_CRACK_SOUND_FILES.map(src => {
+  const a = new Audio(src);
+  a.preload = 'auto';
+  a.volume = 1;
+  return a;
+});
+let soundSinkId = '';
+
+// Ausgabegerät umstellen ("" = Standard des Systems). Ohne das landet der Knall
+// auf dem Windows-Standardgerät – ist das ein virtuelles Gerät (z. B. Steam
+// Streaming Speakers), hört man lokal nichts.
+function applySink(id) {
+  soundSinkId = id || '';
+  for (const a of crackSounds) {
+    if (typeof a.setSinkId !== 'function') continue;
+    a.setSinkId(soundSinkId).then(
+      () => console.log('Sound-Ausgabe gesetzt: ' + (soundSinkId || 'Standard')),
+      err => console.warn('setSinkId fehlgeschlagen: ' + (err && err.name) + ' ' + (err && err.message))
+    );
+  }
+}
+
+function reportAudioDevices() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    console.warn('Keine Audio-Geraeteliste verfuegbar.');
+    return;
+  }
+  navigator.mediaDevices.enumerateDevices().then(list => {
+    const devices = list
+      .filter(d => d.kind === 'audiooutput')
+      .map(d => ({ id: d.deviceId, label: d.label || d.deviceId }));
+    window.bridge.audioDevices(devices);
+  }).catch(err => console.warn('enumerateDevices fehlgeschlagen: ' + err));
+}
+
+// Notfall-Knall aus WebAudio, falls eine Datei nicht abspielbar ist.
+let audioCtx = null;
+function synthCrack() {
+  try {
+    audioCtx = audioCtx || new AudioContext();
+    const sr = audioCtx.sampleRate;
+    const buffer = audioCtx.createBuffer(1, Math.floor(sr * 0.18), sr);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0.6;
+    src.connect(gain).connect(audioCtx.destination);
+    src.start();
+  } catch (e) {
+    console.warn('synthCrack fehlgeschlagen: ' + e);
+  }
+}
 
 document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
 document.addEventListener('mousedown', () => {
@@ -161,10 +224,19 @@ const wrapPi = a => {
 };
 
 function playCrackSound() {
-  if (!WHIP_CRACK_SOUNDS.length) return;
-  const src = WHIP_CRACK_SOUNDS[Math.floor(Math.random() * WHIP_CRACK_SOUNDS.length)];
-  const a = new Audio(src);
-  a.play().catch(() => {});
+  const a = crackSounds[Math.floor(Math.random() * crackSounds.length)];
+  if (!a) return;
+  try { a.currentTime = 0; } catch (e) { /* egal */ }
+  const playback = a.play();
+  const name = a.src.split('/').pop();
+  if (!playback || typeof playback.then != "function") return;
+  playback.then(
+    () => console.log('Knall-Sound gespielt: ' + name + ' (Ausgabe: ' + (soundSinkId || 'Standard') + ')'),
+    err => {
+      console.warn('Knall-Sound FEHLER: ' + name + ' – ' + (err && err.name) + ': ' + (err && err.message));
+      synthCrack();
+    }
+  );
 }
 
 function updateHandleAim() {
@@ -357,18 +429,33 @@ function update() {
   const tip = whip[whip.length - 1];
   const tipVel = Math.hypot(tip.x - tip.px, tip.y - tip.py);
 
-  if (!dropping && tipVel > P.crackSpeed) {
+  // Ruhende Peitsche von selbst fallen lassen: eine herumhängende Peitsche darf
+  // nicht Minuten später bei einer zufälligen Mausbewegung knallen und schreiben.
+  if (!dropping && Date.now() - Math.max(whipSpawnTime, lastCrackTime) > P.idleDropMs) {
+    dropping = true;
+    console.log('Peitsche nach Ruhe von selbst fallen gelassen');
+  }
+
+  const mouseSpeed = Math.hypot(mouseX - prevMouseX, mouseY - prevMouseY);
+  // Ein Knall zählt nur bei bewusstem Schwung: ohne Mausbewegung kann die
+  // Peitsche nicht von selbst knallen, wenn sie nur herumhängt und schwingt.
+  if (!dropping && tipVel > P.crackSpeed && mouseSpeed > P.mouseCrackSpeed) {
     const now = Date.now();
     if (now - whipSpawnTime >= P.firstCrackGraceMs && now - lastCrackTime > P.crackCooldownMs) {
       lastCrackTime = now;
       playCrackSound();
-      window.bridge.whipCrack();
+      // Ein Schwung loest oft mehrere Knalle aus: Sound immer, Nudge nur
+      // einmal pro Mindestpause – sonst mehrere Chat-Nachrichten pro Hieb.
+      const shallNudge = now - lastNudgeTime > P.nudgeCooldownMs;
+      if (shallNudge) lastNudgeTime = now;
+      if (shallNudge) window.bridge.whipCrack();
     }
   }
 
   // If dropping, check if everything fell off screen
   if (dropping && whip.every(p => p.y > H + 60)) {
     whip = null;
+    console.log('Peitsche weg');
     dropping = false;
     window.bridge.hideOverlay();
   }
@@ -435,9 +522,20 @@ function loop() {
 }
 loop();
 
+// ── Audio-Setup ─────────────────────────────────────────────────────────────
+reportAudioDevices();
+window.bridge.onSetSink(id => applySink(id));
+window.bridge.onTestSound(() => playCrackSound());
+window.bridge.onSetSensitivity(level => {
+  P.crackSpeed = level;
+  console.log('Knall-Schwelle: ' + level);
+});
+
 // ── IPC from main process ───────────────────────────────────────────────────
 window.bridge.onSpawnWhip(() => {
   whip = spawnWhip(mouseX || W / 2, mouseY || H / 2);
+  lastNudgeTime = 0;
+  console.log('Peitsche bereit');
   dropping = false;
   prevMouseX = mouseX;
   prevMouseY = mouseY;

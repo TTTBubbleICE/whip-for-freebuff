@@ -2,3 +2,7 @@ node_modules/
 dist/
 out/
 *.tgz
+.tools/
+freebuffwhip.log
+freebuffwhip.config.json
+run.log

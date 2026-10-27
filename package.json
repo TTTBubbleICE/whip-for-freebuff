@@ -1,12 +1,11 @@
 {
-  "name": "openwhip",
-  "version": "1.1.0",
-  "description": "Whip Claude into shape",
+  "name": "whip-for-freebuff",
+  "version": "1.0.0",
+  "description": "Peitsche den Freebuff-Agenten an (Freebuff-Umbau von OpenWhip)",
   "license": "MIT",
   "main": "main.js",
   "bin": {
-    "openwhip": "bin/openwhip.js",
-    "badclaude": "bin/openwhip.js"
+    "whip-for-freebuff": "bin/whip-for-freebuff.js"
   },
   "os": [
     "darwin",
@@ -20,24 +19,25 @@
     "electron",
     "tray",
     "overlay",
-    "cli"
+    "cli",
+    "freebuff",
+    "whip"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GitFrog1111/OpenWhip.git"
+    "url": "git+https://github.com/TTTBubbleICE/whip-for-freebuff.git"
   },
   "bugs": {
-    "url": "https://github.com/GitFrog1111/OpenWhip/issues"
+    "url": "https://github.com/TTTBubbleICE/whip-for-freebuff/issues"
   },
-  "homepage": "https://github.com/GitFrog1111/OpenWhip#readme",
+  "homepage": "https://github.com/TTTBubbleICE/whip-for-freebuff#readme",
   "files": [
     "main.js",
     "preload.js",
     "overlay.html",
     "sounds",
     "icon",
-    "bin/openwhip.js",
-    "bin/badclaude.js",
+    "bin/whip-for-freebuff.js",
     "README.md"
   ],
   "scripts": {
